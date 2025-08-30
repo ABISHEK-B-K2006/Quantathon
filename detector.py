@@ -1,10 +1,12 @@
 import sqlite3
-from sklearn.ensemble import GradientBoostingClassifier
+from catboost import CatBoostClassifier
 import pandas as pd
 import random
 from datetime import datetime
 import requests
 import os
+import re
+
 
 # ----- Config -----
 DB_PATH = os.path.join(os.path.dirname(__file__), "database.db")
@@ -14,7 +16,7 @@ FRAUD_THRESHOLD = 2  # number of fraud posts before marking account Red
 
 PHISHING_KEYWORDS = [
     'free','win','winner','verify','account','suspension','password','urgent','confirm',
-    'secure','claim','prize','click','update','login','bank','ssn','transfer'
+    'secure','claim','prize','click','update','login','bank','ssn','transfer','limited','offer'
 ]
 SHORTENER_DOMAINS = ['bit.ly','tinyurl.com','t.co','goo.gl','ow.ly','is.gd','buff.ly']
 
@@ -115,7 +117,17 @@ def generate_training_data(samples=1000):
 training_df = generate_training_data()
 X = training_df.drop('is_fraudulent', axis=1)
 y = training_df['is_fraudulent']
-model = GradientBoostingClassifier(random_state=42)
+model = CatBoostClassifier(
+    iterations=500,       # number of boosting rounds
+    depth=6,              # depth of trees
+    learning_rate=0.1,    # step size
+    loss_function='Logloss',
+    eval_metric='AUC',
+    verbose=0             # keep training quiet
+)
+
+# Train
+# Train
 model.fit(X, y)
 
 # ----------------- Feature extraction -----------------
@@ -130,19 +142,32 @@ def extract_features(text):
     return [age, ratio, num_links, short, urgency]
 
 # ----------------- Rule-based checks -----------------
+# ----------------- Rule-based checks -----------------
 def rule_based_flag(text):
     text_low = text.lower()
     reasons = []
-    if any(word in text_low for word in PHISHING_KEYWORDS):
-        reasons.append("keyword")
+    
+    # Count occurrences of each phishing keyword
+    keyword_count = sum(1 for word in PHISHING_KEYWORDS if word in text_low)
+    
+    # Flag only if 2 or more distinct keywords are found
+    if keyword_count >= 2:
+        reasons.append(f"keyword_x{keyword_count}") # e.g., "keyword_x2", "keyword_x3"
+    
     if any(domain in text_low for domain in SHORTENER_DOMAINS):
         reasons.append("shortener")
+    
     if sum(1 for w in text.split() if w.startswith("http")) > 2:
         reasons.append("many_links")
-    if any(chunk.isupper() and len(chunk) > 4 for chunk in text.split()):
-        reasons.append("all_caps")
+
+    if "http://" in text_low and "https://" not in text_low:
+        reasons.append("insecure_http")
+    
+    
+        
     return (len(reasons) > 0), reasons
 
+# ----------------- Detector -----------------
 # ----------------- Detector -----------------
 def run_detector(prob_threshold=0.70):
     conn = sqlite3.connect(DB_PATH)
@@ -155,9 +180,12 @@ def run_detector(prob_threshold=0.70):
         prob = model.predict_proba([features])[0][1]
 
         rule_flag, reasons = rule_based_flag(text)
-        links = [w for w in text.split() if w.startswith("http") or w.startswith("www")]
-        unsafe_link_found = any(not is_url_safe("http://" + l if l.startswith("www") else l) for l in links)
-
+        
+        # CORRECTED: Properly indented regex link extraction
+        url_pattern = r'(https?://\S+|www\.\S+)'
+        found_links = re.findall(url_pattern, text)
+        unsafe_link_found = any(not is_url_safe("http://" + l if l.startswith("www") else l) for l in found_links)
+        
         fraud = False
         fraud_reasons = []
         if prob >= prob_threshold:
@@ -168,7 +196,7 @@ def run_detector(prob_threshold=0.70):
             fraud, fraud_reasons = True, fraud_reasons + ["unsafe_link"]
 
         status = "⚠️ Fraud Detected" if fraud else "✅ Safe"
-        status_full = f"{status} ({';'.join(fraud_reasons) if fraud_reasons else 'no_reasons'})"
+        status_full = status
 
         # Update post
         c.execute("UPDATE posts SET status=? WHERE id=?", (status_full, pid))
@@ -196,7 +224,7 @@ def run_detector(prob_threshold=0.70):
                     c.execute("UPDATE users SET fraud_count=? WHERE username=?", (fc, username))
         else:
             if row is None:
-                c.execute("INSERT INTO users(username, status, fraud_count) VALUES (?,?,?,)",
+                c.execute("INSERT INTO users(username, status, fraud_count) VALUES (?,?,?)",  # Fixed extra comma here
                           (username, "✅ Safe", 0))
 
     conn.commit()

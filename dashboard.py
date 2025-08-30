@@ -33,9 +33,9 @@ col3.metric("Total Fraud Alerts", int(total_fraud))
 def highlight_post(row):
     s = row["status"]
     if "Fraud" in s or "⚠️" in s or "unsafe_link" in s:
-        return ["background-color:#FFCCCC"] * len(row)
+        return ["background-color:black"] * len(row)
     if "Safe" in s or "✅" in s:
-        return ["background-color:#E6FFE6"] * len(row)
+        return ["background-color:black"] * len(row)
     return [""] * len(row)
 
 def highlight_user(row):
